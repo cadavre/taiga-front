@@ -73,6 +73,7 @@ class KanbanController extends mixOf(taiga.Controller, taiga.PageMixin, taiga.Fi
         @scope.sectionName = "Kanban"
         @scope.statusViewModes = {}
         @.initializeEventHandlers()
+
         promise = @.loadInitialData()
 
         # On Success
@@ -99,6 +100,8 @@ class KanbanController extends mixOf(taiga.Controller, taiga.PageMixin, taiga.Fi
 
         @scope.$on("assigned-to:added", @.onAssignedToChanged)
         @scope.$on("kanban:us:move", @.moveUs)
+        @scope.$on("kanban:show-userstories-for-status", @.loadUserStoriesForStatus)
+        @scope.$on("kanban:hide-userstories-for-status", @.hideUserStoriesForStatus)
 
     # Template actions
 
@@ -125,7 +128,11 @@ class KanbanController extends mixOf(taiga.Controller, taiga.PageMixin, taiga.Fi
             @scope.project.tags_colors = tags_colors
 
     loadUserstories: ->
-        return @rs.userstories.listAll(@scope.projectId).then (userstories) =>
+        params = {
+            status__is_archived: false
+        }
+
+        return @rs.userstories.listAll(@scope.projectId, params).then (userstories) =>
             @scope.userstories = userstories
             @scope.usByStatus = _.groupBy(userstories, "status")
 
@@ -137,9 +144,20 @@ class KanbanController extends mixOf(taiga.Controller, taiga.PageMixin, taiga.Fi
             # The broadcast must be executed when the DOM has been fully reloaded.
             # We can't assure when this exactly happens so we need a defer
             scopeDefer @scope, =>
-                @scope.$broadcast("userstories:loaded")
+                @scope.$broadcast("userstories:loaded", userstories)
 
             return userstories
+
+    loadUserStoriesForStatus: (ctx, statusId) ->
+        params = { status: statusId }
+        return @rs.userstories.listAll(@scope.projectId, params).then (userstories) =>
+            @scope.usByStatus[statusId] = _.sortBy(userstories, "kanban_order")
+            @scope.$broadcast("kanban:shown-userstories-for-status", statusId, userstories)
+            return userstories
+
+    hideUserStoriesForStatus: (ctx, statusId) ->
+        @scope.usByStatus[statusId] = []
+        @scope.$broadcast("kanban:hidden-userstories-for-status", statusId)
 
     loadKanban: ->
         return @q.all([
@@ -211,22 +229,22 @@ class KanbanController extends mixOf(taiga.Controller, taiga.PageMixin, taiga.Fi
 
         return items
 
-    moveUs: (ctx, us, statusId, index) ->
-        if us.status != statusId
+    moveUs: (ctx, us, oldStatusId, newStatusId, index) ->
+        if oldStatusId != newStatusId
             # Remove us from old status column
-            r = @scope.usByStatus[us.status].indexOf(us)
-            @scope.usByStatus[us.status].splice(r, 1)
+            r = @scope.usByStatus[oldStatusId].indexOf(us)
+            @scope.usByStatus[oldStatusId].splice(r, 1)
 
             # Add us to new status column.
-            @scope.usByStatus[statusId].splice(index, 0, us)
-            us.status = statusId
+            @scope.usByStatus[newStatusId].splice(index, 0, us)
+            us.status = newStatusId
         else
-            r = @scope.usByStatus[statusId].indexOf(us)
-            @scope.usByStatus[statusId].splice(r, 1)
-            @scope.usByStatus[statusId].splice(index, 0, us)
+            r = @scope.usByStatus[newStatusId].indexOf(us)
+            @scope.usByStatus[newStatusId].splice(r, 1)
+            @scope.usByStatus[newStatusId].splice(index, 0, us)
 
-        itemsToSave = @.resortUserStories(@scope.usByStatus[statusId])
-        @scope.usByStatus[statusId] = _.sortBy(@scope.usByStatus[statusId], "kanban_order")
+        itemsToSave = @.resortUserStories(@scope.usByStatus[newStatusId])
+        @scope.usByStatus[newStatusId] = _.sortBy(@scope.usByStatus[newStatusId], "kanban_order")
 
         # Persist the userstory
         promise = @repo.save(us)
@@ -293,6 +311,109 @@ KanbanColumnHeightFixerDirective = ->
 
 
 module.directive("tgKanbanColumnHeightFixer", KanbanColumnHeightFixerDirective)
+
+
+#############################################################################
+## Kanban Archived Status Column Header Control
+#############################################################################
+
+KanbanArchivedStatusHeaderDirective = ($rootscope) ->
+    #TODO: i18N
+    showArchivedText = "Show archived"
+    hideArchivedText = "Hide archived"
+
+    link = ($scope, $el, $attrs) ->
+        status = $scope.$eval($attrs.tgKanbanArchivedStatusHeader)
+        hidden = true
+
+        $scope.class = "icon icon-open-eye"
+        $scope.title = showArchivedText
+
+        $el.on "click", (event) ->
+            hidden = not hidden
+
+            $scope.$apply ->
+                if hidden
+                    $scope.class = "icon icon-open-eye"
+                    $scope.title = showArchivedText
+                    $rootscope.$broadcast("kanban:hide-userstories-for-status", status.id)
+
+                else
+                    $scope.class = "icon icon-closed-eye"
+                    $scope.title = hideArchivedText
+                    $rootscope.$broadcast("kanban:show-userstories-for-status", status.id)
+
+        $scope.$on "$destroy", ->
+            $el.off()
+
+    return {link:link}
+
+module.directive("tgKanbanArchivedStatusHeader", [ "$rootScope", KanbanArchivedStatusHeaderDirective])
+
+
+#############################################################################
+## Kanban Archived Status Column Intro Directive
+#############################################################################
+
+KanbanArchivedStatusIntroDirective = ->
+    # TODO: i18n
+    hiddenUserStoriexText = "The user stories in this status are hidden by default"
+    archivingUserStoriesText = "You are archiving this user stories"
+    userStories = []
+
+    link = ($scope, $el, $attrs) ->
+        status = $scope.$eval($attrs.tgKanbanArchivedStatusIntro)
+        $el.text(hiddenUserStoriexText)
+
+        updateIntroText = ->
+            if userStories.length > 0
+                $el.text("")
+            else
+                $el.text(hiddenUserStoriexText)
+
+        $scope.$on "kanban:us:move", (ctx, itemUs, oldStatusId, newStatusId, itemIndex) ->
+            # Archiving user story
+            if status.id == newStatusId
+                $el.addClass("active")
+                $el.text(archivingUserStoriesText)
+                userStories.splice(itemIndex, 0, itemUs)
+
+            # Unarchiving user story
+            else if status.id == oldStatusId
+                r = userStories.indexOf(itemUs)
+                userStories.splice(r, 1)
+
+                if userStories.length == 0
+                    $el.text(hiddenUserStoriexText)
+                    $el.removeClass("active")
+
+                updateIntroText()
+
+            #Reordering archived
+            else
+                r = userStories.indexOf(itemUs)
+                userStories.splice(r, 1)
+                userStories.splice(itemIndex, 0, itemUs)
+
+        $scope.$on "kanban:shown-userstories-for-status", (ctx, statusId, userStoriesLoaded) ->
+            if statusId == status.id
+                $el.removeClass("active")
+                userStories = _.filter(userStoriesLoaded, (us) -> us.status == status.id)
+                updateIntroText()
+
+        $scope.$on "kanban:hidden-userstories-for-status", (ctx, statusId) ->
+            if statusId == status.id
+                $el.removeClass("active")
+                userStories = []
+                updateIntroText()
+
+        $scope.$on "$destroy", ->
+            $el.off()
+
+    return {link:link}
+
+module.directive("tgKanbanArchivedStatusIntro", KanbanArchivedStatusIntroDirective)
+
 
 #############################################################################
 ## Kanban User Story Directive
