@@ -68,6 +68,9 @@ class WikiDetailController extends mixOf(taiga.Controller, taiga.PageMixin)
         # On Error
         promise.then null, @.onInitialDataError.bind(@)
 
+        @scope.$on "wiki:edit", =>
+            @.loadWiki()
+
     loadProject: ->
         return @rs.projects.getBySlug(@params.pslug).then (project) =>
             @scope.projectId = project.id
@@ -258,6 +261,7 @@ EditableWikiContentDirective = ($window, $document, $repo, $confirm, $loading, $
                 $model.setModelValue = wiki
                 $confirm.notify("success")
                 switchToReadMode()
+                $scope.$emit("wiki:edit")
 
             onError = ->
                 $confirm.notify("error")
